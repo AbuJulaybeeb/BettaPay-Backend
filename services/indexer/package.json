@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@bettapay/webhook-delivery": "workspace:*",
+    "@bettapay/worker-shutdown": "workspace:*",
     "@bettapay/validation": "workspace:*",
     "@bettapay/shared-types": "workspace:^",
     "@fastify/cors": "*",

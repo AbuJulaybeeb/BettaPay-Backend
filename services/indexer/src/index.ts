@@ -22,7 +22,7 @@ import {
   createWebhookWorker,
   WEBHOOK_DEFAULTS,
 } from "@bettapay/webhook-delivery";
-import { closeWorkerWithTimeout, trackActiveJob } from "./worker-shutdown.js";
+import { closeWorkerWithTimeout, trackActiveJob } from "@bettapay/worker-shutdown";
 import { PrismaClient, WebhookSubscription, type Prisma } from "@prisma/client";
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import pg from "pg";
