@@ -114,6 +114,21 @@ export function registerErrorHandler(fastify: FastifyInstance, customLogger?: Fa
 
     if ((error as FastifyError).statusCode) {
       const fastifyErr = error as FastifyError & { validation?: unknown };
+      // #911 — normalise Fastify's body-limit failure into the shared typed
+      // envelope so clients branch on PAYLOAD_TOO_LARGE rather than the
+      // framework-specific FST_ERR_CTP_BODY_TOO_LARGE string.
+      if (fastifyErr.statusCode === 413) {
+        return reply
+          .code(413)
+          .send(
+            createErrorResponse(
+              ErrorCodes.PAYLOAD_TOO_LARGE,
+              'Request body exceeds the maximum allowed size',
+              undefined,
+              reqId,
+            ),
+          );
+      }
       const code = fastifyErr.code || ErrorCodes.INVALID_REQUEST;
       const details = fastifyErr.validation ? redactPiiFromDetails(fastifyErr.validation) : undefined;
       const response = createErrorResponse(code, sanitizeErrorMessage(fastifyErr.message), details, reqId);
