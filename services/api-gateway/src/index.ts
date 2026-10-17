@@ -34,6 +34,7 @@ import Fastify, {
 import cors from "@fastify/cors";
 import fastifyJwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
+import compression from "@fastify/compress";
 import crypto from "crypto";
 import zlib from "zlib";
 import { Transform } from "stream";
@@ -199,6 +200,19 @@ const PAYMENT_LIST_QUERY_SCHEMA = {
       type: "boolean",
       default: false,
       description: "Batch on-chain event enrichment for the page.",
+    },
+    eventPage: {
+      type: "integer",
+      minimum: 1,
+      default: 1,
+      description: "Event pagination page (used when includeEvents=true). Requires includeEvents.",
+    },
+    eventLimit: {
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+      default: 10,
+      description: "Event pagination page size (used when includeEvents=true). Maximum 100; default 10.",
     },
     includeDeleted: {
       type: "boolean",
@@ -620,6 +634,10 @@ export function buildApp(opts: AppOptions = {}) {
   fastify.register(cors, {
     origin: env.ALLOWED_ORIGINS,
     credentials: true,
+  });
+
+  fastify.register(compression, {
+    threshold: 1024,
   });
 
   fastify.register(fastifyJwt, {
@@ -2130,6 +2148,9 @@ fastify.get('/api/admin/auth/ip-score', {
     },
     async (request, reply): Promise<ApiResponse<Merchant>> => {
       const { id } = request.params;
+      const isServiceAuth = Boolean(request.headers["x-service-token"]);
+      const payload = request.user as MerchantJwtPayload;
+
       const merchant = await prisma.merchant.findFirst({
         where: { id, deletedAt: null },
       });
@@ -2142,6 +2163,18 @@ fastify.get('/api/admin/auth/ip-score', {
           ),
         };
       }
+
+      // Check authorization: service-auth can view any merchant, JWT callers only their own
+      if (!isServiceAuth && payload.merchantId !== id) {
+        reply.code(403);
+        return {
+          error: createErrorResponse(
+            ErrorCodes.FORBIDDEN,
+            "You do not have access to this merchant",
+          ),
+        };
+      }
+
       return { data: merchant };
     },
   );
@@ -2707,6 +2740,8 @@ fastify.get('/api/admin/auth/ip-score', {
     async (request, reply) => {
       const query = PaymentListQuery.parse(request.query);
       const { status, from, to, limit, page, includeEvents, includeDeleted } = query;
+      const eventPage = parseInt((request.query as any)?.eventPage ?? "1", 10) || 1;
+      const eventLimit = parseInt((request.query as any)?.eventLimit ?? "10", 10) || 10;
       const requestedMerchantId = (request.query as { merchantId?: string })
         .merchantId;
 
@@ -2778,10 +2813,25 @@ fastify.get('/api/admin/auth/ip-score', {
         ),
       );
 
-      const data = records.map((payment: { merchantId: string }) => ({
-        ...payment,
-        events: eventsByMerchant.get(payment.merchantId) ?? null,
-      }));
+      const data = records.map((payment: { merchantId: string }) => {
+        const allEvents = eventsByMerchant.get(payment.merchantId) ?? null;
+        if (!allEvents || allEvents.length === 0) {
+          return { ...payment, events: null };
+        }
+        // Apply event pagination: slice events based on eventPage and eventLimit
+        const startIdx = (eventPage - 1) * eventLimit;
+        const endIdx = startIdx + eventLimit;
+        const paginatedEvents = allEvents.slice(startIdx, endIdx);
+        return {
+          ...payment,
+          events: paginatedEvents,
+          eventsMeta: {
+            total: allEvents.length,
+            page: eventPage,
+            limit: eventLimit,
+          },
+        };
+      });
 
       return reply.send({
         data,
@@ -3427,9 +3477,11 @@ fastify.get('/api/admin/auth/ip-score', {
     }
   }
 
-  fastify.get("/api/rates", async (request, reply) =>
-    proxyFxUpstream(request, reply, "/api/rates"),
-  );
+  fastify.get("/api/rates", async (request, reply) => {
+    const result = await proxyFxUpstream(request, reply, "/api/rates");
+    reply.header("Cache-Control", "public, max-age=60");
+    return result;
+  });
   fastify.get("/api/currencies", async (request, reply) =>
     proxyFxUpstream(request, reply, "/api/currencies"),
   );
