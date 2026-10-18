@@ -12,6 +12,25 @@ import type { WebhookJobData } from '@bettapay/webhook-delivery';
 let cronInterval: NodeJS.Timeout | null = null;
 const CRON_BATCH = 200;
 
+export const DEFAULT_ABANDONED_PAYMENTS_CRON_INTERVAL_MS = 60 * 60 * 1000;
+export const ABANDONED_PAYMENTS_CRON_INTERVAL_ENV =
+  'ABANDONED_PAYMENTS_CRON_INTERVAL_MS';
+
+/**
+ * Resolves the sweep interval in milliseconds.
+ *
+ * `ABANDONED_PAYMENTS_CRON_INTERVAL_MS` overrides the default; a missing or
+ * invalid value falls back to one hour rather than throwing.
+ */
+export function getAbandonedPaymentsCronIntervalMs(): number {
+  const envVal = process.env[ABANDONED_PAYMENTS_CRON_INTERVAL_ENV];
+  if (envVal) {
+    const parsed = parseInt(envVal, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_ABANDONED_PAYMENTS_CRON_INTERVAL_MS;
+}
+
 /**
  * Finds payments in 'initiated' status older than the configured timeout
  * and transitions them to 'cancelled'.
@@ -125,8 +144,17 @@ export function startAbandonedPaymentsCron(
 ) {
   if (cronInterval) return;
 
+  const envVal = process.env[ABANDONED_PAYMENTS_CRON_INTERVAL_ENV];
+  const intervalMs = getAbandonedPaymentsCronIntervalMs();
+  if (envVal && intervalMs === DEFAULT_ABANDONED_PAYMENTS_CRON_INTERVAL_MS) {
+    logger.warn(
+      { envVal },
+      `Invalid ${ABANDONED_PAYMENTS_CRON_INTERVAL_ENV}; falling back to ${DEFAULT_ABANDONED_PAYMENTS_CRON_INTERVAL_MS}ms`,
+    );
+  }
+
   const runJob = () => autoExpireAbandonedPayments(prisma, logger, abandonmentHours, webhookQueue).catch(err => logger.error({ err }, 'Abandoned payments cron job failed unexpectedly.'));
-  cronInterval = setInterval(runJob, 60 * 60 * 1000); // Run every hour
+  cronInterval = setInterval(runJob, intervalMs);
 }
 
 export function stopAbandonedPaymentsCron() {
