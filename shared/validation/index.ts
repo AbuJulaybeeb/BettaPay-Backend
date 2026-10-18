@@ -624,6 +624,17 @@ export function validateEnv(env: Record<string, unknown>): Env {
       );
     }
 
+    // Issue #910 — Stellar contract strkeys must start with 'C' and be 56
+    // base32 chars (A-Z, 2-7). A malformed ID at startup indicates a config
+    // error that would silently break all on-chain interactions.
+    const CONTRACT_STRKEY_RE = /^C[A-Z2-7]{55}$/;
+    const invalidContractIds = contractIds.filter((id) => !CONTRACT_STRKEY_RE.test(id));
+    if (invalidContractIds.length > 0) {
+      throw new Error(
+        `\n[BettaPay] Invalid or missing environment variables:\n  CONTRACT_IDS: the following are not valid Stellar contract strkeys: ${invalidContractIds.join(", ")}\n`,
+      );
+    }
+
     return {
       ...parsed,
       ALLOWED_ORIGINS: origins,
