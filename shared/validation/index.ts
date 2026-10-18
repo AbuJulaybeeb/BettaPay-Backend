@@ -47,6 +47,9 @@ export const ErrorCodes = {
   UNSUPPORTED_CURRENCY_PAIR: "UNSUPPORTED_CURRENCY_PAIR",
   INVALID_AMOUNT: "INVALID_AMOUNT",
   INVALID_QUERY: "INVALID_QUERY",
+  // #911 — a request body exceeded the route's configured limit. Returned as
+  // a typed 413 so clients can distinguish it from a malformed JSON 400.
+  PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   INVALID_ORIGIN: "INVALID_ORIGIN",
   CONCURRENCY_EXCEEDED: "CONCURRENCY_EXCEEDED",
   // #317 — returned when a suspended merchant attempts to create a payment
@@ -356,6 +359,17 @@ export const EnvSchema = z
       .string()
       .transform((s) => parseInt(s, 10))
       .default("500"),
+
+    // FX Engine — maximum accepted body size for the quote verification
+    // route. Configurable so operators can tighten the limit without a code
+    // change; the route applies it with Fastify's per-route bodyLimit.
+    FX_QUOTE_BODY_LIMIT_BYTES: z
+      .string()
+      .transform((s) => parseInt(s, 10))
+      .default("1048576")
+      .refine((val) => Number.isFinite(val) && val > 0, {
+        message: "FX_QUOTE_BODY_LIMIT_BYTES must be a positive integer",
+      }),
 
     // FX Engine — quote age validation
     QUOTE_MIN_AGE_MS: z

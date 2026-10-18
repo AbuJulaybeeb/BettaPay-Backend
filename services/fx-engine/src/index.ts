@@ -51,6 +51,7 @@ import {
   createHistoryQuerySchema,
   createQuoteQuerySchema,
   createVerifyQuoteBodySchema,
+  resolveFxQuoteBodyLimit,
 } from "./validation.js";
 
 const env = validateEnvOrExit(process.env);
@@ -1283,9 +1284,19 @@ fastify.post<{ Body: unknown }>(
 
 const QuoteQuerySchema = createQuoteQuerySchema(env.NODE_ENV);
 
+// #911 — route-level ceiling for the POST quote body. Sourced from validated
+// configuration so operators can tune it without changing code.
+const FX_QUOTE_BODY_LIMIT_BYTES = resolveFxQuoteBodyLimit(
+  env.FX_QUOTE_BODY_LIMIT_BYTES,
+);
+
 fastify.get(
   "/api/quote",
   {
+    // Quotes are computed from the query string, so the body (if any) is not
+    // used — but the same ceiling keeps an accidental payload from being
+    // buffered without a bound.
+    bodyLimit: FX_QUOTE_BODY_LIMIT_BYTES,
     config: {
       rateLimit: {
         max: 100,
@@ -1303,12 +1314,17 @@ fastify.get(
       query = QuoteQuerySchema.parse(request.query);
     } catch (err) {
       if (err instanceof z.ZodError) {
+        // #912 — an amount problem is reported as INVALID_AMOUNT (with the
+        // field path in details) rather than the generic query code.
+        const amountInvalid = err.errors.some(
+          (issue) => issue.path[0] === "amount",
+        );
         return reply
           .code(400)
           .send(
             createErrorResponse(
-              ErrorCodes.INVALID_QUERY,
-              "Invalid query parameters",
+              amountInvalid ? ErrorCodes.INVALID_AMOUNT : ErrorCodes.INVALID_QUERY,
+              amountInvalid ? "Invalid amount" : "Invalid query parameters",
               err.errors,
             ),
           );
@@ -1320,7 +1336,7 @@ fastify.get(
     const to = query.to.toUpperCase();
     const amount = parseFloat(query.amount);
 
-    if (amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       return reply
         .code(400)
         .send(
@@ -1582,6 +1598,9 @@ interface VerifyQuoteRouteBody {
 fastify.post<{ Body: VerifyQuoteRouteBody }>(
   "/api/quote/verify",
   {
+    // #911 — reject oversized JSON before parsing it. The shared error
+    // handler turns Fastify's 413 into the typed PAYLOAD_TOO_LARGE envelope.
+    bodyLimit: FX_QUOTE_BODY_LIMIT_BYTES,
     config: {
       rateLimit: {
         max: 100,

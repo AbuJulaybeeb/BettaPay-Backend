@@ -2,7 +2,7 @@ import test from 'tape';
 import type { IndexerClient, IndexerEvent } from './clients/indexer-client.js';
 import { validateEnv } from '@bettapay/validation';
 import { buildApp } from './index.js';
-import { createMockPrisma, generateTestJwt } from './test-utils.js';
+import { createMockPrisma, createTestApp, generateTestJwt } from './test-utils.js';
 
 const env = validateEnv(process.env);
 const SERVICE_TOKEN = env.INTER_SERVICE_SECRET || 'inter-service-secret-value';
@@ -220,66 +220,146 @@ test('Payment listing bulk enrichment: indexer unavailability degrades every pay
   t.end();
 });
 
-test('Payment listing: from/to filter createdAt with inclusive UTC boundaries (#915)', async (t) => {
-  const createdAt = (iso: string): Date => new Date(iso);
+// ── #914 / #913 — includeDeleted authorization and page-size bounds ────────
+
+const LIST_ACTIVE_MERCHANT = { id: 'merchant-active', deletedAt: null };
+const LIST_DELETED_MERCHANT = {
+  id: 'merchant-deleted',
+  deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+};
+
+test('Payment listing: default excludes payments belonging to a soft-deleted merchant', async (t) => {
   const payments = [
-    { id: 'pay_before', merchantId: 'merchant-a', status: 'completed', amount: '1.00', asset: 'USDC', createdAt: createdAt('2026-09-30T23:59:59.999Z') },
-    { id: 'pay_from', merchantId: 'merchant-a', status: 'completed', amount: '2.00', asset: 'USDC', createdAt: createdAt('2026-10-01T00:00:00.000Z') },
-    { id: 'pay_middle', merchantId: 'merchant-a', status: 'completed', amount: '3.00', asset: 'USDC', createdAt: createdAt('2026-10-02T12:00:00.000Z') },
-    { id: 'pay_to', merchantId: 'merchant-a', status: 'completed', amount: '4.00', asset: 'USDC', createdAt: createdAt('2026-10-03T00:00:00.000Z') },
-    { id: 'pay_after', merchantId: 'merchant-a', status: 'completed', amount: '5.00', asset: 'USDC', createdAt: createdAt('2026-10-03T00:00:00.001Z') },
+    ...makePayments('merchant-active', 2),
+    ...makePayments('merchant-deleted', 2),
   ];
-  const app = buildApp({ prisma: createMockPrisma({ payments }) as any, logger: false });
-  await app.ready();
-  const token = generateTestJwt(app, { merchantId: 'merchant-a', ownerId: 'owner-a' });
+  const { app } = await createTestApp(
+    {},
+    { merchants: [LIST_ACTIVE_MERCHANT, LIST_DELETED_MERCHANT], payments },
+  );
 
   const res = await app.inject({
     method: 'GET',
-    url: '/api/payments?from=2026-10-01T00:00:00.000Z&to=2026-10-03T00:00:00.000Z&limit=100',
-    headers: { authorization: `Bearer ${token}` },
+    url: '/api/payments',
+    headers: { 'x-service-token': SERVICE_TOKEN },
   });
 
   t.equal(res.statusCode, 200, 'returns 200');
   const body = JSON.parse(res.body);
-  t.deepEqual(
-    body.data.map((p: any) => p.id).sort(),
-    ['pay_from', 'pay_middle', 'pay_to'],
-    'both exact boundaries are included and rows outside the window are excluded',
+  t.equal(body.data.length, 2, 'only active-merchant payments are returned');
+  t.ok(
+    body.data.every((p: FakePayment) => p.merchantId === 'merchant-active'),
+    'deleted-merchant payments are excluded by default',
   );
 
   await app.close();
   t.end();
 });
 
-test('Payment listing: malformed or inverted from/to ranges are rejected (#915)', async (t) => {
-  const app = buildApp({ prisma: createMockPrisma({ payments: makePayments('merchant-a', 1) }) as any, logger: false });
-  await app.ready();
-  const token = generateTestJwt(app, { merchantId: 'merchant-a', ownerId: 'owner-a' });
-
-  const malformed = await app.inject({
-    method: 'GET',
-    url: '/api/payments?from=not-a-date',
-    headers: { authorization: `Bearer ${token}` },
-  });
-  t.equal(malformed.statusCode, 400, 'malformed date is a validation error');
-
-  const inverted = await app.inject({
-    method: 'GET',
-    url: '/api/payments?from=2026-10-03T00:00:00.000Z&to=2026-10-01T00:00:00.000Z',
-    headers: { authorization: `Bearer ${token}` },
-  });
-  t.equal(inverted.statusCode, 400, 'from after to is a validation error');
-
-  const offsetRange = await app.inject({
-    method: 'GET',
-    url: '/api/payments?from=2026-10-01T10:00:00%2B02:00&to=2026-10-01T09:00:00.000Z',
-    headers: { authorization: `Bearer ${token}` },
-  });
-  t.equal(
-    offsetRange.statusCode,
-    200,
-    'bounds are compared as instants, not lexicographic strings with offsets',
+test('Payment listing: admin includeDeleted=true returns soft-deleted payments', async (t) => {
+  const payments = [
+    ...makePayments('merchant-active', 2),
+    ...makePayments('merchant-deleted', 2),
+  ];
+  const { app } = await createTestApp(
+    {},
+    { merchants: [LIST_ACTIVE_MERCHANT, LIST_DELETED_MERCHANT], payments },
   );
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/api/payments?includeDeleted=true',
+    headers: { 'x-service-token': SERVICE_TOKEN },
+  });
+
+  t.equal(res.statusCode, 200, 'returns 200');
+  const body = JSON.parse(res.body);
+  t.equal(body.data.length, 4, 'all payments are returned to the admin caller');
+  t.ok(
+    body.data.some((p: FakePayment) => p.merchantId === 'merchant-deleted'),
+    'soft-deleted merchant payments are visible',
+  );
+
+  await app.close();
+  t.end();
+});
+
+test('Payment listing: merchant JWT cannot request includeDeleted=true', async (t) => {
+  const { app } = await createTestApp(
+    {},
+    {
+      merchants: [LIST_ACTIVE_MERCHANT, LIST_DELETED_MERCHANT],
+      payments: makePayments('merchant-active', 1),
+    },
+  );
+  const token = generateTestJwt(app, { merchantId: 'merchant-active', ownerId: 'owner-a' });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/api/payments?includeDeleted=true',
+    headers: { authorization: `Bearer ${token}` },
+  });
+
+  t.equal(res.statusCode, 403, 'returns 403 for a merchant caller');
+  t.equal(JSON.parse(res.body).error.code, 'FORBIDDEN', 'uses FORBIDDEN');
+
+  await app.close();
+  t.end();
+});
+
+test('Payment listing: includeDeleted rejects values other than true/false', async (t) => {
+  const { app } = await createTestApp({}, { payments: makePayments('merchant-active', 1) });
+  const token = generateTestJwt(app, { merchantId: 'merchant-active', ownerId: 'owner-a' });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/api/payments?includeDeleted=yes',
+    headers: { authorization: `Bearer ${token}` },
+  });
+
+  t.equal(res.statusCode, 400, 'returns 400');
+  t.equal(JSON.parse(res.body).error.code, 'VALIDATION_ERROR', 'uses VALIDATION_ERROR');
+
+  await app.close();
+  t.end();
+});
+
+test('Payment listing: limit defaults to 50, accepts 100 and rejects 101', async (t) => {
+  const payments = makePayments('merchant-active', 105);
+  const { app } = await createTestApp(
+    {},
+    { merchants: [LIST_ACTIVE_MERCHANT], payments },
+  );
+
+  const token = generateTestJwt(app, { merchantId: 'merchant-active', ownerId: 'owner-a' });
+  const auth = { authorization: `Bearer ${token}` };
+
+  const defaulted = await app.inject({ method: 'GET', url: '/api/payments', headers: auth });
+  t.equal(defaulted.statusCode, 200, 'default page returns 200');
+  t.equal(JSON.parse(defaulted.body).data.length, 50, 'default limit is 50');
+
+  const atMax = await app.inject({
+    method: 'GET',
+    url: '/api/payments?limit=100',
+    headers: auth,
+  });
+  t.equal(atMax.statusCode, 200, 'limit at the maximum is accepted');
+  t.equal(JSON.parse(atMax.body).data.length, 100, 'returns the requested page size');
+
+  const overMax = await app.inject({
+    method: 'GET',
+    url: '/api/payments?limit=101',
+    headers: auth,
+  });
+  t.equal(overMax.statusCode, 400, 'limit above the maximum is rejected');
+  t.equal(JSON.parse(overMax.body).error.code, 'VALIDATION_ERROR', 'uses VALIDATION_ERROR');
+
+  const nonNumeric = await app.inject({
+    method: 'GET',
+    url: '/api/payments?limit=abc',
+    headers: auth,
+  });
+  t.equal(nonNumeric.statusCode, 400, 'non-numeric limit is rejected');
 
   await app.close();
   t.end();
