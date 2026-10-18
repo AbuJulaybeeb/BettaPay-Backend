@@ -1387,6 +1387,11 @@ fastify.get(
     const resolvedAt = Date.now();
     const resolved = resolvePairRate(from, to, resolvedAt);
     cacheHit = resolved.source === "cache";
+    if (cacheHit) {
+      fxQuoteCacheHitsTotal.inc();
+    } else {
+      fxQuoteCacheMissesTotal.inc();
+    }
     logRateStalenessIfStale(fastify.log, `${from}_${to}`);
 
     const stalenessSeconds = Math.floor((resolvedAt - cache.cachedAt) / 1000);
@@ -1749,6 +1754,16 @@ const fxQuoteCreationDurationHistogram = new promClient.Histogram({
   help: "Duration of FX quote creation in milliseconds",
   labelNames: ["cache_hit"] as const,
   buckets: [1, 2, 5, 10, 20, 50, 100],
+});
+
+// Issue #891 — FX quote cache hit/miss counters
+const fxQuoteCacheHitsTotal = new promClient.Counter({
+  name: "fx_quote_cache_hits_total",
+  help: "Total number of FX quote resolutions served from the rate cache",
+});
+const fxQuoteCacheMissesTotal = new promClient.Counter({
+  name: "fx_quote_cache_misses_total",
+  help: "Total number of FX quote resolutions that required a live rate computation",
 });
 
 // Served on its own port (see startMetricsServer below), not on the
