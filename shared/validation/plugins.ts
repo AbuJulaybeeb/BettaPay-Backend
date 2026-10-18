@@ -7,6 +7,7 @@ import { createErrorResponse, ErrorCodes } from './index.js';
 declare module 'fastify' {
   interface FastifyInstance {
     serviceAuth: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    adminAuth: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 }
 
@@ -299,4 +300,34 @@ export function createServiceAuth(
  */
 export function registerServiceAuth(fastify: FastifyInstance, secret: string | string[]): void {
   fastify.decorate('serviceAuth', createServiceAuth(secret));
+}
+
+/**
+ * Issue #908 — Create a preValidation hook that checks `x-admin-api-key`
+ * against the supplied secret using a timing-safe comparison, preventing
+ * timing-based enumeration of the key.
+ */
+export function createAdminApiKeyAuth(
+  secret: string,
+): (request: FastifyRequest, reply: FastifyReply) => Promise<void> {
+  if (!secret || secret.length < 32) {
+    throw new Error('createAdminApiKeyAuth: secret must be at least 32 characters');
+  }
+
+  return async function adminApiKeyAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const header = request.headers['x-admin-api-key'];
+    const key = Array.isArray(header) ? header[0] : header;
+
+    const valid = key && timingSafeStrEqual(key, secret);
+    if (!valid) {
+      const reason = !key ? 'missing_key' : 'invalid_key';
+      request.log?.warn(
+        { reqId: request.id, route: `${request.method} ${request.url}`, reason },
+        'adminApiKeyAuth: rejected',
+      );
+      return reply
+        .code(401)
+        .send(createErrorResponse(ErrorCodes.UNAUTHORIZED, 'Invalid or missing admin API key'));
+    }
+  };
 }
