@@ -320,6 +320,8 @@ const SERVICE_VERSION = readServiceVersion(import.meta.url);
 
 // --- Request lifecycle timeouts ---------------------------------------------
 
+const CLIENT_TIMEOUT_HEADER = "x-client-timeout-ms";
+
 // REQUEST_TIMEOUT_MS bounds how long a single request may run. If a handler
 // (e.g. a slow DB query or a hung upstream service) exceeds it, the per-request
 // hook below replies 408 Request Timeout so the client connection is released
@@ -610,6 +612,50 @@ export function buildApp(opts: AppOptions = {}) {
     crossOriginResourcePolicy: { policy: "same-origin" },
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     hsts: { maxAge: 31536000 },
+  });
+
+  // Per-request timeout: replies 408 once the configured limit elapses so a
+  // hung handler cannot hold the connection open. A client may shorten (never
+  // extend) the limit with x-client-timeout-ms. The limit is read from
+  // GATEWAY_TIMEOUT_CONFIG on every request.
+  const requestTimers = new WeakMap<FastifyRequest, NodeJS.Timeout>();
+  fastify.addHook(
+    "onRequest",
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const configured = GATEWAY_TIMEOUT_CONFIG.requestTimeoutMs;
+      const requested = Number(request.headers[CLIENT_TIMEOUT_HEADER]);
+      const limitMs =
+        Number.isInteger(requested) && requested > 0 && requested < configured
+          ? requested
+          : configured;
+      const timer = setTimeout(() => {
+        if (reply.sent) return;
+        request.log.warn(
+          { method: request.method, url: request.url, limitMs },
+          "Request timed out",
+        );
+        reply
+          .code(408)
+          .send(
+            createErrorResponse(
+              ErrorCodes.REQUEST_TIMEOUT,
+              "Request Timeout",
+              undefined,
+              request.id,
+            ),
+          );
+      }, limitMs);
+      timer.unref();
+      requestTimers.set(request, timer);
+    },
+  );
+  fastify.addHook("onResponse", async (request: FastifyRequest) => {
+    const timer = requestTimers.get(request);
+    if (timer) clearTimeout(timer);
+  });
+  fastify.addHook("onRequestAbort", async (request: FastifyRequest) => {
+    const timer = requestTimers.get(request);
+    if (timer) clearTimeout(timer);
   });
 
   fastify.addHook("onSend", async (_request, reply, _payload) => {

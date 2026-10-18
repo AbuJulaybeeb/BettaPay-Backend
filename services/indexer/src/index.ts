@@ -491,7 +491,8 @@ const replayWorker = new Worker(
               ? evt.topic.map(String)
               : [String(evt.topic)];
             const rawValue = evt.value.toXDR("base64");
-            const decodedPayload = decodeScVal(evt.value, topics[0]);
+            const decodedPayload =
+              decodeScVal(evt.value, topics[0]) ?? null;
             const resolvedContractId = evt.contractId
               ? evt.contractId.toString()
               : targetContractId;
@@ -657,22 +658,27 @@ function serializeNative(value: unknown): unknown {
   return value;
 }
 
-function decodeScVal(evtValue: xdr.ScVal, topicHint: string): unknown {
+/** @internal exported for testing only */
+export function decodeScVal(
+  evtValue: xdr.ScVal,
+  topicHint: string,
+): unknown {
   try {
     const native = scValToNative(evtValue);
     return serializeNative(native);
   } catch (err) {
     fastify.log.warn(
       { topicHint, err: String(err) },
-      "[Indexer] Failed to decode XDR — raw value preserved",
+      "[Indexer] Failed to decode XDR — event skipped",
     );
-    return null;
+    return undefined;
   }
 }
 
 // ── Event payload validation ──────────────────────────────────────────────────
 
-const EVENT_SCHEMA_MAP: Record<string, z.ZodTypeAny> = {
+/** @internal exported for testing only */
+export const EVENT_SCHEMA_MAP: Record<string, z.ZodTypeAny> = {
   PaymentInitiated: paymentInitiatedEvent,
   PaymentCompleted: paymentCompletedEvent,
   SettlementTriggered: settlementTriggeredEvent,
@@ -681,7 +687,8 @@ const EVENT_SCHEMA_MAP: Record<string, z.ZodTypeAny> = {
   AnchorSettled: anchorSettledEvent,
 };
 
-function validatePayload(type: string, payload: unknown): string | null {
+/** @internal exported for testing only */
+export function validatePayload(type: string, payload: unknown): string | null {
   const schema = EVENT_SCHEMA_MAP[type];
   if (!schema) return null;
   const result = schema.safeParse(payload);
@@ -1300,12 +1307,18 @@ fastify.post(
       );
     }
 
+    // Both modes return the same fields; only `status` (and whether rows were
+    // deleted) differs. A real run reports the preview of what it removed.
+    const preview = (await cleanupOldEvents(true)) as CleanupDryRunResult;
     if (dryRun) {
-      const dryResult = await cleanupOldEvents(true);
-      return reply.code(200).send(dryResult);
+      return reply
+        .code(200)
+        .send({ status: "dry-run", ...preview, deletedCount: 0 });
     }
-    const deletedCount = await cleanupOldEvents();
-    return reply.code(200).send({ status: "completed", deletedCount });
+    const deletedCount = (await cleanupOldEvents()) as number;
+    return reply
+      .code(200)
+      .send({ status: "completed", ...preview, deletedCount });
   },
 );
 
@@ -1652,6 +1665,7 @@ async function pollEvents() {
       // event). Decode/validate are unchanged; every event still becomes its
       // own row, including events carrying a validationError.
       const pendingEvents: Prisma.IndexedEventCreateManyInput[] = [];
+      let skippedEventCount = 0;
 
       for (const evt of response.events) {
         if (aborted) break;
@@ -1676,7 +1690,18 @@ async function pollEvents() {
         const contractName = getContractName(resolvedContractId);
         const stellarId = typeof evt.id === "string" ? evt.id : null;
 
+        // A malformed payload is logged by decodeScVal and skipped so one bad
+        // event cannot stall the cycle; later events are still processed.
+        if (decodedPayload === undefined) {
+          skippedEventCount++;
+          continue;
+        }
+
         const validationError = validatePayload(topics[0], decodedPayload);
+        if (validationError !== null) {
+          skippedEventCount++;
+          continue;
+        }
 
         pendingEvents.push({
           id: "evt_" + crypto.randomUUID().replace(/-/g, ""),
@@ -1694,6 +1719,13 @@ async function pollEvents() {
         });
 
         eventsFetchedCounter.inc({ contractId: resolvedContractId });
+      }
+
+      if (skippedEventCount > 0) {
+        fastify.log.warn(
+          { skipped: skippedEventCount, processed: pendingEvents.length },
+          "[Indexer] Skipped events that failed decode or validation",
+        );
       }
 
       if (pendingEvents.length > 0) {

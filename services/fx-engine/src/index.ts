@@ -28,6 +28,10 @@ import {
 } from "./quote-computation.js";
 import { Queue, Worker } from "bullmq";
 import {
+  createFallbackTracker,
+  startFallbackWarningLoop,
+} from "./fallback-tracker.js";
+import {
   validateEnvOrExit,
   registerErrorHandler,
   registerRequestId,
@@ -317,10 +321,15 @@ const fxFallbackActive = new promClient.Gauge({
   name: "fx_fallback_active",
   help: "Indicates if the system is currently in fallback mode (1 = fallback, 0 = live)",
 });
-fxFallbackActive.set(0);
 
-// Log every 5 minutes when in fallback mode
-const FALLBACK_WARNING_INTERVAL_MS = 5 * 60 * 1000;
+// Sustained fallback raises an alert through the notifier (#883). The default
+// notifier logs at error level so log-based alerting can pick it up.
+const fallbackTracker = createFallbackTracker({
+  counter: fxFallbackEventsTotal,
+  gauge: fxFallbackActive,
+  notifier: (alert) =>
+    fastify.log.error(alert, "FX fallback alert: sustained fallback to seed rates"),
+});
 
 // ── Circuit breaker for CoinGecko API calls ────────────────────────────────
 //
@@ -463,7 +472,7 @@ async function fetchBaseRates(): Promise<Record<string, number> | null> {
     };
     lastSuccessfulFetch = Date.now();
     fallbackStartTime = null;
-    fxFallbackActive.set(0);
+    fallbackTracker.recordLive();
     return fetched;
   } catch (err) {
     const e = err as Error;
@@ -571,9 +580,8 @@ async function refreshTick(): Promise<void> {
           if (fallbackStartTime === null) {
             fallbackStartTime = Date.now();
             fastify.log.warn("Entering fallback FX rate mode");
-            fxFallbackEventsTotal.inc();
-            fxFallbackActive.set(1);
           }
+          fallbackTracker.recordFallback();
         }
       } finally {
         await releaseRateFetchLock(lockToken);
@@ -620,9 +628,8 @@ async function refreshTick(): Promise<void> {
       if (fallbackStartTime === null) {
         fallbackStartTime = Date.now();
         fastify.log.warn("Entering fallback FX rate mode");
-        fxFallbackEventsTotal.inc();
-        fxFallbackActive.set(1);
       }
+      fallbackTracker.recordFallback();
     }
   } catch (err) {
     fastify.log.error({ err }, "Unexpected error in refresh tick");
@@ -788,19 +795,10 @@ function startRefreshLoop(): void {
 
   // Log warning every 5 minutes if in fallback mode (#236)
   if (fallbackWarningIntervalHandle === null) {
-    fallbackWarningIntervalHandle = setInterval(() => {
-      if (fallbackStartTime !== null) {
-        const durationMs = Date.now() - fallbackStartTime;
-        const durationMin = Math.round(durationMs / 60000);
-        fastify.log.warn(
-          { durationMs, durationMin },
-          `Operating in fallback FX rate mode for ${durationMin} minute(s); rates API unavailable`,
-        );
-      }
-    }, FALLBACK_WARNING_INTERVAL_MS);
-    if (typeof fallbackWarningIntervalHandle.unref === "function") {
-      fallbackWarningIntervalHandle.unref();
-    }
+    fallbackWarningIntervalHandle = startFallbackWarningLoop({
+      getStartTime: () => fallbackStartTime,
+      warn: (ctx, msg) => fastify.log.warn(ctx, msg),
+    }) as ReturnType<typeof setInterval>;
   }
 }
 
