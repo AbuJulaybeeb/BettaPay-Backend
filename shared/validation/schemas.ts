@@ -719,6 +719,7 @@ export const PaymentListQuery = PaginationQuery.extend({
     .max(PAYMENTS_MAX_PAGE_SIZE)
     .default(PAYMENTS_DEFAULT_PAGE_SIZE),
   status: z.enum(["initiated", "completed", "failed", "cancelled"]).optional(),
+  // Inclusive UTC bounds on createdAt: from <= createdAt <= to (#915).
   from: isoDateString.optional(),
   to: isoDateString.optional(),
   // Batches on-chain event enrichment across the page instead of querying the
@@ -729,10 +730,13 @@ export const PaymentListQuery = PaginationQuery.extend({
   includeDeleted: StrictBooleanQuery.default(false),
 }).refine(
   (data) => {
-    if (data.from && data.to) return data.from <= data.to;
+    // Compare instants, not lexicographic strings: ISO-8601 inputs may carry
+    // offsets, so "2026-10-01T10:00:00+02:00" is earlier than
+    // "2026-10-01T09:00:00Z" even though it sorts later as text.
+    if (data.from && data.to) return Date.parse(data.from) <= Date.parse(data.to);
     return true;
   },
-  { message: "to must be after from" },
+  { message: "to must not be before from" },
 );
 export type PaymentListQuery = z.infer<typeof PaymentListQuery>;
 
