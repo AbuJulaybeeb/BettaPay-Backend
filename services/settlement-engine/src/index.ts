@@ -55,6 +55,29 @@ import {
 } from './redis-semaphore.js';
 import { closeWorkerWithTimeout, trackActiveJob } from '@bettapay/worker-shutdown';
 import { validateTimeoutConstants } from './timeout-constants.js';
+
+/**
+ * Mask PII fields before writing to reconcile log lines (#905).
+ * Replaces merchant identifiers and raw amounts with redacted placeholders so
+ * log aggregators never store payment-level PII.
+ */
+function redactReconcileLog<T extends Record<string, unknown>>(obj: T): T {
+  const out = { ...obj } as Record<string, unknown>;
+  for (const key of Object.keys(out)) {
+    const lk = key.toLowerCase();
+    if (lk.includes('merchantid') || lk.includes('merchant_id') || lk.includes('accountid')) {
+      const v = out[key];
+      // Keep a stable prefix for cross-entry correlation without exposing the full id.
+      out[key] = typeof v === 'string' ? `${v.slice(0, 4)}***` : '[REDACTED]';
+    } else if (
+      lk.includes('amount') || lk.includes('diff') || lk.includes('gross') ||
+      lk.includes('fee') || lk.includes('net')
+    ) {
+      out[key] = '[REDACTED]';
+    }
+  }
+  return out as T;
+}
 import { startSettlementReaper } from './settlement-reaper.js';
 import { MerchantCache, getCachedMerchant } from '../../shared/validation/merchant-cache.js';cache.js
 
@@ -1041,9 +1064,9 @@ fastify.get<{ Querystring: ReconcileQuery }>('/api/settlements/reconcile', async
     reconciliationAmountDiffGauge.set({ merchant_id: merchantIdLabel, amount_type: 'fee' }, parseFloat(feeDiff.toString()));
     reconciliationAmountDiffGauge.set({ merchant_id: merchantIdLabel, amount_type: 'net' }, parseFloat(netDiff.toString()));
 
-    // Log discrepancies for alerting
+    // Log discrepancies for alerting (#905: PII fields pass through redactReconcileLog)
     if (hasDiscrepancies) {
-      fastify.log.warn({
+      fastify.log.warn(redactReconcileLog({
         merchantId: merchantIdLabel,
         missing: missing.length,
         extra: extra.length,
@@ -1051,12 +1074,12 @@ fastify.get<{ Querystring: ReconcileQuery }>('/api/settlements/reconcile', async
         grossDiff: grossDiff.toString(),
         feeDiff: feeDiff.toString(),
         netDiff: netDiff.toString(),
-      }, 'Reconciliation discrepancies detected');
+      }), 'Reconciliation discrepancies detected');
     } else {
-      fastify.log.info({
+      fastify.log.info(redactReconcileLog({
         merchantId: merchantIdLabel,
         matched: matchedCount,
-      }, 'Reconciliation completed with no discrepancies');
+      }), 'Reconciliation completed with no discrepancies');
       validCount++;
     }
 

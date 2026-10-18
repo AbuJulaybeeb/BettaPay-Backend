@@ -116,6 +116,7 @@ import {
   registerServiceAuth,
   createAuditLogger,
   timingSafeStrEqual,
+  type AuditLogRequestLike,
 } from "@bettapay/validation";
 import type { Merchant } from "@prisma/client";
 import type { ApiResponse, PaginatedResponse } from "@bettapay/shared-types";
@@ -1896,6 +1897,22 @@ fastify.get('/api/admin/auth/ip-score', {
               { email, domain },
               "[Auth] Google OAuth rejected: email domain not allowed",
             );
+            // #904 — audit the rejection so unauthorized access attempts leave a
+            // traceable record. Tokens are never written; only the domain and a
+            // stable, non-sensitive account identifier are included.
+            await logAuditEvent(
+              "auth.google.domain_rejected",
+              "google_oauth",
+              "domain_check",
+              {
+                reason: "domain_not_allowed",
+                domain: domain ?? null,
+                // Partial-mask the local part so the entry is non-sensitive
+                // but still useful for correlation across attempts.
+                accountHint: email.replace(/^[^@]+/, (local) => local[0] + "***"),
+              },
+              request as unknown as AuditLogRequestLike,
+            ).catch(() => {});
             return reply
               .code(403)
               .send(
@@ -2093,6 +2110,11 @@ fastify.get('/api/admin/auth/ip-score', {
         await revokeJti(jti, remainingLifetime);
       }
       await revokeAuthSession(merchantId, jti);
+
+      // #903 — expire any outstanding wallet challenge for this address so a
+      // stale challenge cannot be replayed after the session ends. discard()
+      // is a no-op when no challenge is outstanding, keeping logout idempotent.
+      await walletChallenges.discard(merchantId).catch(() => {});
 
       return reply.send({ status: "logged_out" });
     },
