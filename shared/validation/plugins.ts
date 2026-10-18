@@ -285,7 +285,17 @@ export function createServiceAuth(
 
     const valid = token && secrets.some((s) => timingSafeStrEqual(token, s));
     if (!valid) {
-      request.log?.warn({ reqId: request.id }, 'serviceAuth: missing or invalid service token');
+      const reason = !token ? 'missing_token' : 'invalid_token';
+      const callerHint = token ? `${token.slice(0, 4)}***` : null;
+      request.log?.warn(
+        {
+          reqId: request.id,
+          route: `${request.method} ${request.url}`,
+          caller: callerHint,
+          reason,
+        },
+        'serviceAuth: rejected',
+      );
       return reply
         .code(401)
         .send(createErrorResponse(ErrorCodes.UNAUTHORIZED, 'Invalid or missing service token'));
