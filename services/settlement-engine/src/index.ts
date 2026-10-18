@@ -326,6 +326,21 @@ const reconciliationAmountDiffGauge = new promClient.Gauge({
   labelNames: ['merchant_id', 'amount_type'],
 });
 
+// Issue #890 — settlement queue depth gauge.
+// Uses prom-client's async collect callback so the gauge always reflects the
+// live BullMQ waiting+active count at the moment Prometheus scrapes the metric.
+const settlementQueueDepthGauge = new promClient.Gauge({
+  name: 'settlement_queue_depth',
+  help: 'Current number of jobs in the settlement queue (waiting + active)',
+  collect() {
+    settlementQueue.getJobCounts('waiting', 'active').then((counts) => {
+      this.set((counts.waiting ?? 0) + (counts.active ?? 0));
+    }).catch(() => {
+      // Queue unreachable — leave the gauge at its last value.
+    });
+  },
+});
+
 // Served on its own port (see startMetricsServer below), not on the
 // application port — keeps the scrape endpoint unauthenticated without
 // exposing it alongside application traffic.
