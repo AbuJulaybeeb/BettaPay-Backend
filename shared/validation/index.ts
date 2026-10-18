@@ -448,6 +448,23 @@ export const EnvSchema = z
       .refine((val) => Number.isFinite(val) && val >= 1 && val <= 10000, {
         message: "BATCH_MIN_COUNT must be between 1 and 10000",
       }),
+    // Gross volume that batches an asset even when below BATCH_MIN_COUNT (0 disables).
+    BATCH_VOLUME_THRESHOLD: z
+      .string()
+      .transform((s) => Number(s))
+      .default("0")
+      .refine((val) => Number.isFinite(val) && val >= 0, {
+        message: "BATCH_VOLUME_THRESHOLD must be >= 0",
+      }),
+    // Max settlements processed per batching run (0 = unlimited). Remaining
+    // pending settlements are picked up, oldest first, by the next run.
+    BATCH_MAX_SIZE: z
+      .string()
+      .transform((s) => parseInt(s, 10))
+      .default("0")
+      .refine((val) => Number.isFinite(val) && val >= 0, {
+        message: "BATCH_MAX_SIZE must be >= 0",
+      }),
 
     // Settlement Engine — optional daily volume limit for pre-validation.
     // When set, the settlement engine rejects settlement creation requests
